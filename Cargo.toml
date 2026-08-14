@@ -1,0 +1,24 @@
+[package]
+name = "uvc-camera"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "跨平台 UVC 相机统一引擎（Windows MediaFoundation / Linux V4L2 / macOS AVFoundation），免驱即插即用"
+license = "Apache-2.0"
+repository = "https://gitee.com/eternalnight996/uvc-camera"
+homepage = "https://gitee.com/eternalnight996/uvc-camera"
+documentation = "https://docs.rs/uvc-camera"
+keywords = ["uvc", "camera", "usb", "video", "webcam"]
+categories = ["multimedia::video", "hardware-support"]
+
+[dependencies]
+# nokhwa：跨平台摄像头库。input-native = Windows(MediaFoundation)+Linux(V4L2)+macOS(AVFoundation)
+# output-threaded = CallbackCamera（后台线程取帧 + 回调），实现免阻塞预览流
+nokhwa = { version = "0.10", default-features = false, features = ["input-native", "output-threaded"] }
+# 图像编码（抓图 JPEG/PNG 输出）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+thiserror = "2"
+
+[profile.release]
+opt-level = 2
+strip = true

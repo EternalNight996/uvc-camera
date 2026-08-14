@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="200" viewBox="0 0 720 200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a73e8"/>
+      <stop offset="100%" stop-color="#0d47a1"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="200" rx="28" fill="url(#bg)"/>
+  <text x="360" y="105" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="84" font-weight="bold" fill="#ffffff" text-anchor="middle" letter-spacing="2">uvc-camera</text>
+  <text x="360" y="155" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="30" fill="#cfe0fb" text-anchor="middle">UVC Camera Engine</text>
+</svg>
