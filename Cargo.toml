@@ -14,7 +14,8 @@ categories = ["multimedia::video", "hardware-support"]
 [dependencies]
 # nokhwa：跨平台摄像头库。input-native = Windows(MediaFoundation)+Linux(V4L2)+macOS(AVFoundation)
 # output-threaded = CallbackCamera（后台线程取帧 + 回调），实现免阻塞预览流
-nokhwa = { version = "0.10", default-features = false, features = ["input-native", "output-threaded"] }
+# decoding = MJPEG 帧解码（mozjpeg）；缺少会导致真实 MJPEG 帧解码报 "Not available on WASM"（无画面）
+nokhwa = { version = "0.10", default-features = false, features = ["input-native", "output-threaded", "decoding"] }
 # 图像编码（抓图 JPEG/PNG 输出）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 thiserror = "2"

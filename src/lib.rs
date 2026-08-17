@@ -24,6 +24,8 @@
 //! # Ok::<(), uvc_camera::Error>(())
 //! ```
 
+use std::sync::{Arc, Mutex};
+
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::CallbackCamera;
@@ -57,6 +59,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct UvcCamera {
     cam: CallbackCamera,
     format: CameraFormat,
+    /// 最新 RGBA 帧（后台解码线程写入；`frame()` 只读缓存，零解码不阻塞主线程）
+    latest_rgba: Arc<Mutex<Option<RgbaFrame>>>,
 }
 
 impl UvcCamera {
@@ -77,10 +81,21 @@ impl UvcCamera {
             _ => RequestedFormatType::AbsoluteHighestResolution,
         };
         let req = RequestedFormat::new::<RgbFormat>(requested);
-        let mut cam = CallbackCamera::new(CameraIndex::Index(index), req, |_| {})?;
+        // 后台线程回调：解码 MJPEG 帧 → RGBA 缓存（避免 GUI 主线程做 CPU 密集解码导致卡顿）
+        let latest_rgba = Arc::new(Mutex::new(None::<RgbaFrame>));
+        let latest_clone = latest_rgba.clone();
+        let mut cam = CallbackCamera::new(CameraIndex::Index(index), req, move |buf| {
+            if let Ok(img) = buf.decode_image::<RgbFormat>() {
+                let (w, h) = img.dimensions();
+                let frame = rgb_to_rgba(w, h, img.into_raw());
+                if let Ok(mut l) = latest_clone.lock() {
+                    *l = Some(frame);
+                }
+            }
+        })?;
         cam.open_stream()?;
         let format = cam.camera_format()?;
-        Ok(Self { cam, format })
+        Ok(Self { cam, format, latest_rgba })
     }
 
     /// 当前生效的采集格式（分辨率 / 帧率）
@@ -106,10 +121,19 @@ impl UvcCamera {
         Ok(())
     }
 
-    /// 取最新一帧并解码为 RGBA（非阻塞；后台线程持续更新，无帧时可能取到空帧）
+    /// 取最新一帧 RGBA（非阻塞；后台线程已解码缓存，主线程零解码）
+    ///
+    /// 打开即由回调线程持续解码 MJPEG → RGBA；此处仅读缓存（浅拷贝 Vec），
+    /// 不阻塞 GUI 主线程，保证预览流畅。
     pub fn frame(&mut self) -> Result<RgbaFrame> {
-        let buf = self.cam.last_frame()?;
-        decode_to_rgba(buf)
+        let l = self
+            .latest_rgba
+            .lock()
+            .map_err(|e| Error::Other(format!("帧缓存锁失败: {e}")))?;
+        match &*l {
+            Some(f) => Ok(f.clone()),
+            None => Err(Error::Other("相机尚未产生帧（后台解码中）".into())),
+        }
     }
 
     /// 阻塞取一帧并编码为 JPEG（对齐 AndroidUSBCamera 的 JPG 拍照）
