@@ -27,7 +27,7 @@
 use std::sync::{Arc, Mutex};
 
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::utils::{ApiBackend, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::CallbackCamera;
 
 pub mod control;
@@ -35,6 +35,7 @@ pub mod device;
 
 pub use control::{Control, ControlInfo, ControlValue};
 pub use device::{list_devices, DeviceInfo, OpenOptions};
+pub use nokhwa::utils::CameraFormat;
 
 use crate::control::{from_known_control, to_known_control};
 
@@ -106,6 +107,32 @@ impl UvcCamera {
     /// 当前分辨率 (width, height)
     pub fn resolution(&self) -> (u32, u32) {
         (self.format.resolution().width_x, self.format.resolution().height_y)
+    }
+
+    /// 枚举相机支持的格式（UVC 协议：分辨率 × 帧率 × 像素格式组合）
+    ///
+    /// 用于设置页「分辨率下拉框」——严格按相机实际支持项展示，
+    /// 而非预置列表（遵循 UVC 协议）。
+    ///
+    /// 实现：遍历相机支持的像素格式（fourcc），对每种格式取分辨率→帧率表，
+    /// 组合成完整 CameraFormat 列表。
+    pub fn camera_formats(&mut self) -> Result<Vec<CameraFormat>> {
+        let mut out = Vec::new();
+        // 1. 相机支持的像素格式（MJPEG / YUYV 等）
+        let fourccs = self.cam.compatible_fourcc().map_err(Error::Camera)?;
+        // 2. 每种格式：分辨率 → 帧率列表
+        for fourcc in fourccs {
+            let map = self
+                .cam
+                .compatible_list_by_resolution(fourcc)
+                .map_err(Error::Camera)?;
+            for (res, fps_list) in map {
+                for fps in fps_list {
+                    out.push(CameraFormat::new(res, fourcc, fps));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 切换分辨率（Closest 策略）
