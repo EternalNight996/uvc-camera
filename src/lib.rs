@@ -27,7 +27,7 @@
 use std::sync::{Arc, Mutex};
 
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::CallbackCamera;
 
 pub mod control;
@@ -35,7 +35,7 @@ pub mod device;
 
 pub use control::{Control, ControlInfo, ControlValue};
 pub use device::{list_devices, DeviceInfo, OpenOptions};
-pub use nokhwa::utils::CameraFormat;
+pub use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
 
 use crate::control::{from_known_control, to_known_control};
 
