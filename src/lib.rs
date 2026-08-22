@@ -24,6 +24,7 @@
 //! # Ok::<(), uvc_camera::Error>(())
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nokhwa::pixel_format::RgbFormat;
@@ -62,6 +63,8 @@ pub struct UvcCamera {
     format: CameraFormat,
     /// 最新 RGBA 帧（后台解码线程写入；`frame()` 只读缓存，零解码不阻塞主线程）
     latest_rgba: Arc<Mutex<Option<RgbaFrame>>>,
+    /// 已解码帧序号（回调线程递增；上层据此判断流停滞——指针因克隆每次都变，不可用）
+    frame_seq: Arc<AtomicU64>,
 }
 
 impl UvcCamera {
@@ -85,6 +88,8 @@ impl UvcCamera {
         // 后台线程回调：解码 MJPEG 帧 → RGBA 缓存（避免 GUI 主线程做 CPU 密集解码导致卡顿）
         let latest_rgba = Arc::new(Mutex::new(None::<RgbaFrame>));
         let latest_clone = latest_rgba.clone();
+        let frame_seq = Arc::new(AtomicU64::new(0));
+        let frame_seq_clone = frame_seq.clone();
         let mut cam = CallbackCamera::new(CameraIndex::Index(index), req, move |buf| {
             if let Ok(img) = buf.decode_image::<RgbFormat>() {
                 let (w, h) = img.dimensions();
@@ -92,11 +97,13 @@ impl UvcCamera {
                 if let Ok(mut l) = latest_clone.lock() {
                     *l = Some(frame);
                 }
+                // 流有新帧：递增序号（上层据此判断是否停滞）
+                frame_seq_clone.fetch_add(1, Ordering::Relaxed);
             }
         })?;
         cam.open_stream()?;
         let format = cam.camera_format()?;
-        Ok(Self { cam, format, latest_rgba })
+        Ok(Self { cam, format, latest_rgba, frame_seq })
     }
 
     /// 当前生效的采集格式（分辨率 / 帧率）
@@ -148,25 +155,59 @@ impl UvcCamera {
         Ok(())
     }
 
-    /// 取最新一帧 RGBA（非阻塞；后台线程已解码缓存，主线程零解码）
-    ///
-    /// 打开即由回调线程持续解码 MJPEG → RGBA；此处仅读缓存（浅拷贝 Vec），
-    /// 不阻塞 GUI 主线程，保证预览流畅。
-    pub fn frame(&mut self) -> Result<RgbaFrame> {
+    /// 当前帧序号（流停滞判断用；回调线程每解出一帧 +1）
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq.load(Ordering::Relaxed)
+    }
+
+    /// 取最新一帧 + 帧序号（序号用于判断流停滞；指针因克隆每次都变，不可用于判断）
+    pub fn frame_with_seq(&mut self) -> Result<(RgbaFrame, u64)> {
+        let seq = self.frame_seq.load(Ordering::Relaxed);
         let l = self
             .latest_rgba
             .lock()
             .map_err(|e| Error::Other(format!("帧缓存锁失败: {e}")))?;
         match &*l {
-            Some(f) => Ok(f.clone()),
+            Some(f) => Ok((f.clone(), seq)),
             None => Err(Error::Other("相机尚未产生帧（后台解码中）".into())),
         }
     }
 
-    /// 阻塞取一帧并编码为 JPEG（对齐 AndroidUSBCamera 的 JPG 拍照）
+    /// 取最新一帧 RGBA（非阻塞；后台线程已解码缓存，主线程零解码）
     ///
+    /// 打开即由回调线程持续解码 MJPEG → RGBA；此处仅读缓存（浅拷贝 Vec），
+    /// 不阻塞 GUI 主线程，保证预览流畅。
+    pub fn frame(&mut self) -> Result<RgbaFrame> {
+        Ok(self.frame_with_seq()?.0)
+    }
+
+    /// 取帧并编码 JPEG。
+    ///
+    /// ⚠️ 生产防卡死：优先用**最近缓存帧**编码（非阻塞，不抢相机互斥锁）。
+    /// 相机停流时 `poll_frame` 会永久阻塞并持有互斥锁导致 GUI 卡死，故不再调用它。
     /// `quality`：JPEG 质量 1..=100
     pub fn capture(&mut self, quality: u8) -> Result<Vec<u8>> {
+        // 优先用最近缓存帧（非阻塞）
+        let frame = {
+            let l = self
+                .latest_rgba
+                .lock()
+                .map_err(|e| Error::Other(format!("帧缓存锁失败: {e}")))?;
+            match &*l {
+                Some(f) => Some(f.clone()),
+                None => None,
+            }
+        };
+        if let Some(f) = frame {
+            let rgb: Vec<u8> = f.data.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            let img = image::RgbImage::from_raw(f.width, f.height, rgb)
+                .ok_or_else(|| Error::Other("RGBA 转 RGB 失败".into()))?;
+            let mut out = std::io::Cursor::new(Vec::new());
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.min(100));
+            img.write_with_encoder(encoder)?;
+            return Ok(out.into_inner());
+        }
+        // 无缓存帧（相机尚未出帧）：退回 poll_frame（正常应很快返回）
         let buf = self.cam.poll_frame()?;
         let img = buf.decode_image::<RgbFormat>()?;
         let mut out = std::io::Cursor::new(Vec::new());
