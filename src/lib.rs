@@ -292,10 +292,12 @@ fn rgb_to_rgba(width: u32, height: u32, raw: Vec<u8>) -> RgbaFrame {
     RgbaFrame {
         width,
         height,
-        data: raw
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
+        data: Arc::from(
+            raw
+                .chunks_exact(3)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect::<Vec<u8>>(),
+        ),
     }
 }
 
@@ -304,7 +306,7 @@ fn rgb_to_rgba(width: u32, height: u32, raw: Vec<u8>) -> RgbaFrame {
 pub struct RgbaFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
+    pub data: Arc<[u8]>,
 }
 
 /// 原生后端信息（跨平台常量，调试/日志用）
