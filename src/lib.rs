@@ -53,6 +53,28 @@ pub enum Error {
 
 /// 跨平台统一返回
 pub type Result<T> = std::result::Result<T, Error>;
+/// UVC 控制传输重试次数
+
+/// 参考 CherryUSB `usbh_video_get`：UVC 控制请求（SET_CUR / GET_CUR / 控制枚举）
+/// 会因 USB 总线忙或设备暂未就绪而瞬时失败，带重试能显著提升控制项读写稳健性，
+/// 避免一次失败即被视为“控制不可用”而整组不可用。
+const CONTROL_RETRY: u32 = 3;
+
+/// 带重试地执行一次控制操作（对齐 CherryUSB 的控制传输重试容忍策略）
+fn retry_ctrl<T, F>(mut op: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    let mut last_err = None;
+    for _ in 0..CONTROL_RETRY {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| Error::Other("UVC 控制操作失败".into())))
+}
+
 
 /// UVC 相机句柄（对齐 AndroidUSBCamera 的 `CameraClient`）
 ///
@@ -223,8 +245,11 @@ impl UvcCamera {
     }
 
     /// 支持的 UVC 控制项列表（含当前值/范围，对齐 `getSupportedControls`）
+    ///
+    /// 参考 CherryUSB `usbh_video_get`：UVC 控制枚举可能瞬时失败，这里带 3 次重试，
+    /// 避免一次总线抖动即返回空控制列表（导致成像面板不可用）。
     pub fn supported_controls(&mut self) -> Result<Vec<ControlInfo>> {
-        let controls = self.cam.camera_controls()?;
+        let controls = retry_ctrl(|| self.cam.camera_controls().map_err(Error::Camera))?;
         Ok(controls
             .into_iter()
             .filter_map(|cc| from_known_control(cc.control()).map(|c| ControlInfo::new(c, &cc)))
@@ -232,23 +257,27 @@ impl UvcCamera {
     }
 
     /// 设置 UVC 控制项（对齐 `setCtrlValue`）
+    ///
+    /// 参考 CherryUSB `usbh_video_set`：控制写请求可能瞬时失败，带 3 次重试。
     pub fn set_control(&mut self, control: Control, value: ControlValue) -> Result<()> {
         let known = to_known_control(control).ok_or_else(|| Error::Other("不支持的控件".into()))?;
-        self.cam.set_camera_control(known, value.into_setter())?;
+        retry_ctrl(|| self.cam.set_camera_control(known, value.into_setter()).map_err(Error::Camera))?;
         Ok(())
     }
 
     /// 读取单个控制项当前值
+    ///
+    /// 注意：nokhwa 无单控制读取接口，需枚举后匹配；枚举也带重试。
     pub fn get_control(&mut self, control: Control) -> Result<ControlValue> {
         let known = to_known_control(control).ok_or_else(|| Error::Other("不支持的控件".into()))?;
-        let cc = self
-            .cam
-            .camera_controls()?
+        let controls = retry_ctrl(|| self.cam.camera_controls().map_err(Error::Camera))?;
+        let cc = controls
             .into_iter()
             .find(|c| c.control() == known)
             .ok_or_else(|| Error::Other(format!("控件不可用: {control}")))?;
         Ok(ControlValue::from_setter(cc.value()))
     }
+
 }
 
 /// 解码一帧 Buffer 为 RGBA 像素（RGB → RGBA，alpha=255，兼容 egui 纹理）
