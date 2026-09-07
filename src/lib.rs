@@ -55,6 +55,9 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 /// UVC 控制传输重试次数
 
+/// 抓图无缓存帧时的最长等待（毫秒）：轮询后台解码线程出帧，超时即放弃（防 poll_frame 永久阻塞）
+const CAPTURE_WAIT_MS: u64 = 1000;
+
 /// 参考 CherryUSB `usbh_video_get`：UVC 控制请求（SET_CUR / GET_CUR / 控制枚举）
 /// 会因 USB 总线忙或设备暂未就绪而瞬时失败，带重试能显著提升控制项读写稳健性，
 /// 避免一次失败即被视为“控制不可用”而整组不可用。
@@ -229,13 +232,33 @@ impl UvcCamera {
             img.write_with_encoder(encoder)?;
             return Ok(out.into_inner());
         }
-        // 无缓存帧（相机尚未出帧）：退回 poll_frame（正常应很快返回）
-        let buf = self.cam.poll_frame()?;
-        let img = buf.decode_image::<RgbFormat>()?;
-        let mut out = std::io::Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.min(100));
-        img.write_with_encoder(encoder)?;
-        Ok(out.into_inner())
+        // 无缓存帧（相机尚未出帧）：短暂等待后台解码线程出帧（有限轮询，绝不阻塞）。
+        // #15 原实现用 poll_frame 可能永久阻塞并持有互斥锁导致调用方（MVCheck UI 线程）卡死；
+        // 改为轮询最新缓存帧，最多等 CAPTURE_WAIT_MS 后放弃，超时返回错误交给上层停滞恢复。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(CAPTURE_WAIT_MS);
+        while std::time::Instant::now() < deadline {
+            let f = {
+                let l = self
+                    .latest_rgba
+                    .lock()
+                    .map_err(|e| Error::Other(format!("帧缓存锁失败: {e}")))?;
+                match &*l {
+                    Some(f) => Some(f.clone()),
+                    None => None,
+                }
+            };
+            if let Some(f) = f {
+                let rgb: Vec<u8> = f.data.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                let img = image::RgbImage::from_raw(f.width, f.height, rgb)
+                    .ok_or_else(|| Error::Other("RGBA 转 RGB 失败".into()))?;
+                let mut out = std::io::Cursor::new(Vec::new());
+                let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.min(100));
+                img.write_with_encoder(encoder)?;
+                return Ok(out.into_inner());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(Error::Other("抓图超时：相机未出帧/流停滞（已等待 1s）".into()))
     }
 
     /// 停止预览线程并关闭相机
